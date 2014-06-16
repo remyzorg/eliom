@@ -8,14 +8,17 @@ It should be self-documenting (refer to {{{eliom-distillery -help}}} and the
 generated {{{README}}}), but here is a bit information on how to work
 with it.
 
-<<outline depth="2"| <<header| =Table of contents= >> >>
+<<outline depth="2"| <<header| **Table of contents** >> >>
 
 
 
 === Project Initialization
 
-The {{{eliom-distillery}}} creates projects from templates. Currently,
-only a very simplistic project name "basic" is supported. To create it, just call
+The {{{eliom-distillery}}} creates projects from templates.
+Template "basic" create a very simple project (makefiles and configuration file
+and main service). There is also a template "mobile" for mobile apps.
+
+To create your project, do:
 
 <<code language="shell"|
 $ eliom-distillery -name <name> -template basic [-target-directory <dir>]

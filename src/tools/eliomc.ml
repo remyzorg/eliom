@@ -138,14 +138,14 @@ let compile_ocaml ~impl_intf file =
     output_prefix file ^ ext in
   create_process !compiler ( ["-c" ;
                               "-o" ; obj ;
-                              "-pp"; get_pp !ppopt]
+                              "-pp"; get_pp [] !ppopt]
                              @ !args
 			     @ get_thread_opt ()
 			     @ get_common_include ()
 			     @ [impl_intf_opt impl_intf; file] )
 
 let output_ocaml_interface file =
-    create_process !compiler ( ["-i"; "-pp"; get_pp !ppopt] @ !args
+    create_process !compiler ( ["-i"; "-pp"; get_pp [] !ppopt] @ !args
                                @ get_common_include ()
                                @ [file] )
 
@@ -163,18 +163,19 @@ let compile_obj file =
 (* Process eliom and eliomi files *)
 
 let get_ppopts ?kind ~impl_intf file =
-  let pa_cmo =
+  let pkg =
     match get_kind kind with
-      | `Client -> "pa_eliom_client_client.cmo"
-      | `Server | `ServerOpt -> "pa_eliom_client_server.cmo"
+      | `Client -> ["eliom.syntax.client"]
+      | `Server | `ServerOpt -> ["eliom.syntax.server"]
   in
-  pa_cmo :: type_opt impl_intf file @ !ppopt @ [impl_intf_opt impl_intf]
+  pkg, type_opt impl_intf file @ !ppopt @ [impl_intf_opt impl_intf]
 
 let compile_server_type_eliom file =
   let obj = output_prefix ~ty:true file ^ !server_types_file_ext
-  and ppopts = ["pa_eliom_type_filter.cmo"] @ !ppopt @ ["-impl"] in
+  and ppopts = !ppopt @ ["-impl"] in
   if !do_dump then begin
-    let camlp4, ppopt = get_pp_dump ("-printer" :: "o" :: ppopts @ [file]) in
+    let camlp4, ppopt =
+      get_pp_dump ["eliom.syntax.type"] ("-printer" :: "o" :: ppopts @ [file]) in
     create_process camlp4 ppopt;
     exit 0
   end;
@@ -184,7 +185,7 @@ let compile_server_type_eliom file =
     Sys.remove obj
   in
   create_process ~out ~on_error
-    !compiler ( [ "-i" ; "-pp"; get_pp ppopts]
+    !compiler ( [ "-i" ; "-pp"; get_pp ["eliom.syntax.type"] ppopts]
 		@ !args
     		@ get_common_include ()
 		@ ["-impl"; file] );
@@ -204,7 +205,8 @@ let output_eliom_interface ~impl_intf file =
     with End_of_file -> ()
   in
   let args kind =
-    let pp = get_pp (get_ppopts ~kind ~impl_intf file) in
+    let pkg, ppopts = get_ppopts ~kind ~impl_intf file in
+    let pp = get_pp pkg ppopts in
     [ "-i" ; "-pp" ; pp; "-intf-suffix"; ".eliomi" ]
     @ !args
     @ get_common_include ~kind ()
@@ -226,15 +228,15 @@ let compile_eliom ~impl_intf file =
     in
     output_prefix file ^ ext
   in
-  let ppopts = get_ppopts ~impl_intf file in
+  let pkg, ppopts = get_ppopts ~impl_intf file in
   if !do_dump then begin
-    let camlp4, ppopt = get_pp_dump ("-printer" :: "o" :: ppopts @ [file]) in
+    let camlp4, ppopt = get_pp_dump pkg ("-printer" :: "o" :: ppopts @ [file]) in
     create_process camlp4 ppopt;
     exit 0
   end;
   create_process !compiler ( [ "-c" ;
                                "-o"  ; obj ;
-                               "-pp" ; get_pp ppopts;
+                               "-pp" ; get_pp pkg ppopts;
                                "-intf-suffix"; ".eliomi" ]
                              @ get_thread_opt ()
 			     @ !args
@@ -244,11 +246,11 @@ let compile_eliom ~impl_intf file =
 
 let process_eliom ~impl_intf file =
   match !mode with
-    | `Infer when impl_intf = `Impl ->
+  | `Infer when impl_intf = `Impl ->
       compile_server_type_eliom file
-    | `Interface ->
+  | `Interface ->
       output_eliom_interface ~impl_intf file
-    | _ ->
+  | _ ->
       compile_eliom ~impl_intf file
 
 let build_server ?(name = "a.out") () =
@@ -260,7 +262,7 @@ let build_client () =
   let exe = prefix_output_dir (Filename.basename name) in
   check_or_create_dir (Filename.dirname exe);
   let js = name ^ ".js" in
-  create_process !compiler ( ["-o"  ;  exe ]
+  create_process !compiler ( ["-o"  ;  exe ; "-linkall"]
 			     @ get_common_include ()
 			     @ get_client_lib ()
 			     @ !args );
@@ -274,6 +276,8 @@ let rec process_option () =
   while !i < Array.length Sys.argv do
     match Sys.argv.(!i) with
     | "-help" | "--help" -> usage ()
+    | "-no-autoload" -> autoload_predef := false; incr i
+    | "-type_conv" -> type_conv := true; incr i
     | "-i" -> set_mode `Interface; incr i
     | "-c" -> set_mode `Compile; incr i
     | "-a" -> set_mode `Library; incr i
@@ -357,24 +361,36 @@ let rec process_option () =
   | `Compile | `Infer | `Interface -> ()
 
 let main () =
+  let cmd = Filename.basename Sys.argv.(0) in
+  let cmd =
+    try
+      let idx = String.index cmd '.' in
+      String.sub cmd 0 idx
+    with Not_found -> cmd in
   let k =
-    match Filename.basename Sys.argv.(0) with
-      | "eliomopt" ->
-	  compiler := ocamlopt;
-	  build_dir := default_server_dir;
-	  `ServerOpt
-      | "eliomcp" ->
-	  compiler := ocamlcp;
-	  build_dir := default_server_dir;
-	  `Server
-      | "js_of_eliom" ->
-	  compiler := ocamlc;
-	  build_dir := default_client_dir;
-	  `Client
-      | "eliomc" | _ ->
-	  compiler := ocamlc;
-	  build_dir := default_server_dir;
-	  `Server in
+    match cmd with
+    | "eliomopt" ->
+	    compiler := ocamlopt;
+	    build_dir := default_server_dir;
+	    `ServerOpt
+    | "eliomcp" ->
+	    compiler := ocamlcp;
+	    build_dir := default_server_dir;
+	    `Server
+    | "js_of_eliom" ->
+	    compiler := ocamlc;
+	    build_dir := default_client_dir;
+	    `Client
+    | "eliomc" ->
+	    compiler := ocamlc;
+	    build_dir := default_server_dir;
+	    `Server
+    | s ->
+      Format.eprintf "exec name not recognize %S: fallback to ocamlc@." s;
+  	  compiler := ocamlc;
+	    build_dir := default_server_dir;
+	    `Server
+  in
   kind := k;
   process_option ()
 

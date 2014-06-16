@@ -1,13 +1,14 @@
 
 open Printf
 
+let distillery_basic = "basic"
+
 let usage_msg = Printf.sprintf
   "Welcome to the Eliom distillery!\n\
    \n\
    This program generates the scaffold for your Eliom application\n\
-   from a template. Currently, it only supports a very simple\n\
-   template named \"basic\", but later versions will include more\n\
-   comprehensive templates!\n\
+   from a template.\n\
+   Available templates: \"basic\", \"mobile\", (and possibly more).\n\
    \n\
    Call it like this\
    \n\  $ %s -name <name> [-template basic] [-target-directory <dest>]\
@@ -169,12 +170,8 @@ let preds () = [
     "OCAML3"
 ]
 
-let get_datadir () =
-  try Sys.getenv "ELIOM_DATA_DIR"
-  with Not_found -> Config.datadir
 
-let get_templatedir () =
-  Filename.concat (get_datadir ()) Config.templatedir
+let get_templatedir () = Findlib.package_directory "eliom.templates"
 
 let get_templates () =
   let dir = Unix.opendir (get_templatedir ()) in
@@ -200,7 +197,7 @@ let main () =
   let dir = ref false in
   let bad fmt = Printf.ksprintf (fun s -> raise (Arg.Bad s)) fmt in
   let name = ref None in
-  let template = ref Config.distillery_basic in
+  let template = ref distillery_basic in
   let templates = get_templates () in
   let select_template s =
     try template := (List.find ((=) s) templates)

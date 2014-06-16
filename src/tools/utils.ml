@@ -44,6 +44,9 @@ let pp : string option ref = ref None
 let kind : [ `Server | `Client | `ServerOpt ] ref = ref `Server
 let type_file : string option ref = ref None
 
+let autoload_predef = ref true
+let type_conv = ref false
+
 let default_server_dir =
   try Sys.getenv "ELIOM_SERVER_DIR"
   with Not_found -> "_server"
@@ -91,7 +94,24 @@ let get_predicates ?kind:k () = match get_kind k with
   | `Client -> ["byte"] @ !predicates
   | `ServerOpt -> ["native"] @ !predicates
 
-let syntax_predicates = [ "preprocessor"; "syntax"; "camlp4o" ] @ !predicates
+let syntax_predicates = lazy ([ "preprocessor"; "syntax"; "camlp4o" ] @ !predicates)
+
+(* compute pkg_`package_name` predicate like ocamlfind binary does *)
+let get_pkg_predicates pkgs =
+  List.map
+    (fun p -> "pkg_"^p)
+    (Findlib.package_deep_ancestors (Lazy.force syntax_predicates) pkgs)
+
+let with_autoload all_pkgs =
+  if !autoload_predef
+  then begin
+    (* Format.eprintf "\nAUTOLOADING PREDEF PKGS\n%s\n@." (String.concat ", " all_pkgs); *)
+    let l = "eliom.syntax.predef"::all_pkgs in
+    if !type_conv
+    then "deriving.syntax.tc"::"type_conv"::l
+    else "deriving.syntax.std"::l
+  end
+  else all_pkgs
 
 let get_server_package ?kind:k ?package:p () =
   let package =
@@ -99,34 +119,87 @@ let get_server_package ?kind:k ?package:p () =
       | Some p -> p
       | None -> !package
   in
+  let pkgs = "eliom.server" :: package in
+  let pkg_predicates = get_pkg_predicates pkgs in
   try
-    Findlib.package_deep_ancestors (get_predicates ?kind:k ()) ("eliom.server" :: package)
+    Findlib.package_deep_ancestors
+      (get_predicates ?kind:k () @ pkg_predicates)
+      pkgs
   with Findlib.No_such_package (name, _) ->
     Printf.eprintf "Unknown package: %s\n%!" name;
     exit 1
 
 let get_client_package ?kind:k () =
+  let pkgs = "eliom.client" :: !package in
+  let pkg_predicates = get_pkg_predicates pkgs in
   try
-    Findlib.package_deep_ancestors (get_predicates ?kind:k ()) ("eliom.client" :: !package)
+    Findlib.package_deep_ancestors
+      (get_predicates ?kind:k () @ pkg_predicates)
+      pkgs
   with Findlib.No_such_package (name, _) ->
     Printf.eprintf "Unknown package: %s\n%!" name;
     exit 1
 
-let get_syntax_package () =
-  try
-    Findlib.package_deep_ancestors syntax_predicates
-      ("eliom.syntax"
-       :: (List.filter
-             (fun p ->
-               try
-	         let objs =
-	           Findlib.package_property syntax_predicates p "archive" in
-	         List.concat (List.map (split ',') (split ' ' objs)) <> []
-	       with Not_found -> false)
-             !package))
-  with Findlib.No_such_package (name, _) ->
-    Printf.eprintf "Unknown package: %s\n%!" name;
-    exit 1
+let explain_who_need ~find ~from =
+  let pkg_predicates = get_pkg_predicates from in
+  (* remove pkg_type_conv from predicates to exclude weak dependencies *)
+  (* Weak dependencies: pa_eliom_seed needs to be loaded after type_conv IF type_conv EXISTS *)
+  let pkg_predicates = List.filter ((<>) "pkg_type_conv") pkg_predicates in
+  let l = List.filter (fun pkg ->
+      if
+        try
+          begin
+	          let objs = Findlib.package_property (pkg_predicates @ Lazy.force syntax_predicates) pkg "archive"
+	          in List.concat (List.map (split ',') (split ' ' objs)) <> []
+          end
+	      with Not_found -> false
+      then
+        begin
+          let l = Findlib.package_deep_ancestors (pkg_predicates @ Lazy.force syntax_predicates) [pkg] in
+          List.mem find l
+        end
+      else false
+    ) from in
+  match l with
+  | [] -> ()
+  | _ -> Printf.eprintf "List of packages requiring %s: %s.\n%!" find (String.concat ", " l)
+
+let get_syntax_package pkg =
+  let resolve_syntax_packages pkgs =
+    (* Format.eprintf "pkgs: %s@." (String.concat ", " pkgs); *)
+    let pkg_predicates = get_pkg_predicates pkgs in
+    try
+      Findlib.package_deep_ancestors (Lazy.force syntax_predicates @ pkg_predicates )
+        (List.filter
+           (fun p ->
+              let all_predicates = pkg_predicates @ (Lazy.force syntax_predicates) in
+              try
+	              let objs =
+	                Findlib.package_property all_predicates  p "archive" in
+	              List.concat (List.map (split ',') (split ' ' objs)) <> []
+	            with Not_found -> false)
+           pkgs)
+    with Findlib.No_such_package (name, _) ->
+      Printf.eprintf "Unknown package: %s\n%!" name;
+      exit 1 in
+  let all_pkgs = pkg @ !package in
+  let resolved_pkgs = resolve_syntax_packages (with_autoload all_pkgs) in
+  if !autoload_predef
+  then
+    if !type_conv && List.mem "deriving.syntax.std" resolved_pkgs
+    then begin
+      Printf.eprintf "Error: '-type_conv' option enabled but some packages require the deriving syntax to be loaded.\n%!";
+      explain_who_need ~find:"deriving.syntax.std" ~from:all_pkgs;
+      exit 1
+    end
+    else if not !type_conv && List.mem "type_conv" resolved_pkgs
+    then begin
+      Printf.eprintf "Error: '-type_conv' option disabled but some packages require the type_conv syntax to be loaded.\n%!";
+      explain_who_need ~find:"type_conv" ~from:all_pkgs;
+      exit 1
+    end
+    else resolved_pkgs
+  else resolved_pkgs
 
 let has_package name =
   try
@@ -148,17 +221,19 @@ let get_common_include ?kind:k ?build_dir:dir ?package:p () =
     | "" | "." -> []
     | d -> ["-I"; d]
 
-let get_common_syntax () =
-  map_include (List.map Findlib.package_directory (get_syntax_package ()))
+let get_common_syntax pkg =
+  let syntax_pkg = get_syntax_package pkg in
+  (* Format.eprintf "pkgs: %s@." (String.concat ", " syntax_pkg); *)
+  map_include (List.map Findlib.package_directory syntax_pkg)
   @ List.concat
     (List.map
        (fun p ->
-	 try
-	   let objs =
-	     Findlib.package_property ("byte"::syntax_predicates) p "archive" in
-	   List.concat (List.map (split ',') (split ' ' objs))
-	 with Not_found -> [])
-       (get_syntax_package ()))
+          try
+            let objs =
+              Findlib.package_property ("byte"::(Lazy.force syntax_predicates)) p "archive" in
+            List.concat (List.map (split ',') (split ' ' objs))
+          with Not_found -> [])
+       syntax_pkg)
 
 let get_client_lib ?kind:k () =
   List.concat
@@ -177,18 +252,21 @@ let get_client_js () =
   ]
 
 (* Should be calld only with -dump... *)
-let get_pp_dump opt = match !pp with
-  | None -> (!camlp4, get_common_syntax () @ opt)
+let get_pp_dump pkg opt = match !pp with
+  | None -> (!camlp4, get_common_syntax pkg @ opt)
   | Some pp ->
       try
         ignore(String.index pp ' ');
         Printf.eprintf "Incompatible option: -pp and -dump\n%!";
         exit 1
-      with Not_found -> (pp, get_common_syntax () @ opt)
+      with Not_found -> (pp, get_common_syntax pkg @ opt)
 
-let get_pp opt = match !pp with
-  | None -> String.concat " " (!camlp4 :: get_common_syntax () @ opt)
-  | Some pp -> pp ^ " " ^ String.concat " " (get_common_syntax () @ opt)
+let get_pp pkg opt =
+  let s = match !pp with
+    | None -> String.concat " " (!camlp4 :: get_common_syntax pkg @ opt)
+    | Some pp -> pp ^ " " ^ String.concat " " (get_common_syntax pkg @ opt)
+  (* Format.eprintf "get_pp %S@." s *)
+  in s
 
 let get_thread_opt () = match !kind with
   | `Client -> []
